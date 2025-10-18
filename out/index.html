@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Solana Token Transfers</title>
+    <title>Solana Transactions</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
       tailwind.config = {
@@ -38,7 +38,6 @@
       import { Connection, PublicKey } from "https://esm.sh/@solana/web3.js@1.95.4";
 
       const SOLSCAN_BASE = "https://solscan.io/tx/";
-      const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 
       function clusterFromRpcUrl(url) {
         const u = url.toLowerCase();
@@ -48,153 +47,16 @@
         return undefined;
       }
 
-      async function fetchTokenList() {
-        try {
-          const res = await fetch(
-            "https://raw.githubusercontent.com/solana-labs/token-list/main/src/tokens/solana.tokenlist.json"
-          );
-          const data = await res.json();
-          const map = {};
-          for (const t of data.tokens || []) {
-            map[t.address] = { symbol: t.symbol, name: t.name };
-          }
-          return map;
-        } catch {
-          return {};
-        }
-      }
-
-      async function getOwnedTokenAccounts(connection, owner) {
-        try {
-          const resp = await connection.getTokenAccountsByOwner(owner, { programId: TOKEN_PROGRAM_ID });
-          const set = new Set();
-          for (const acc of resp.value) {
-            set.add(acc.pubkey.toBase58());
-          }
-          return set;
-        } catch {
-          return new Set();
-        }
-      }
-
-      function collectParsedInstructions(tx) {
-        const out = [];
-        const top = (tx.transaction?.message?.instructions ?? []);
-        for (const ix of top) out.push(ix);
-        const inner = tx.meta?.innerInstructions ?? [];
-        for (const group of inner) {
-          for (const ix of (group.instructions ?? [])) {
-            out.push(ix);
-          }
-        }
-        return out;
-      }
-
-      async function getTransfersForAddress(rpcUrl, address, max) {
+      async function getLastTransactions(rpcUrl, address, max) {
         const connection = new Connection(rpcUrl, "confirmed");
-        const wallet = new PublicKey(address);
-
-        // Resolve token accounts owned by the wallet
-        const ownedTokenAccounts = await getOwnedTokenAccounts(connection, wallet);
-
-        const signatures = await connection.getSignaturesForAddress(wallet, { limit: 100 });
-        const out = [];
-        const tokenList = await fetchTokenList();
-
-        for (const sigInfo of signatures) {
-          if (out.length >= max) break;
-          try {
-            const tx = await connection.getParsedTransaction(sigInfo.signature, {
-              maxSupportedTransactionVersion: 0,
-            });
-            if (!tx) continue;
-
-            const blockTime = tx.blockTime ?? null;
-            const signature = sigInfo.signature;
-
-            const instructions = collectParsedInstructions(tx);
-
-            for (const ix of instructions) {
-              const parsed = ix?.parsed;
-              const type = parsed?.type;
-              const program = ix?.program;
-              const info = parsed?.info || {};
-
-              // SPL token transfers
-              if ((program === "spl-token" || info.mint) && (type === "transferChecked" || type === "transfer")) {
-                const source = info.source || null;
-                const destination = info.destination || null;
-                const mint = info.mint || null;
-                const decimals = typeof info.decimals === "number" ? info.decimals : null;
-                const rawAmountStr = info.tokenAmount?.amount ?? info.amount ?? null;
-
-                const related =
-                  (source && ownedTokenAccounts.has(source)) ||
-                  (destination && ownedTokenAccounts.has(destination));
-                if (!related) continue;
-
-                let amount = null;
-                if (rawAmountStr !== null) {
-                  const n = Number(rawAmountStr);
-                  if (Number.isFinite(n)) {
-                    amount = decimals != null ? n / 10 ** decimals : n;
-                  }
-                }
-
-                const meta = mint ? tokenList[mint] : undefined;
-
-                out.push({
-                  signature,
-                  timestamp: blockTime,
-                  mint,
-                  symbol: meta?.symbol ?? null,
-                  name: meta?.name ?? null,
-                  amount,
-                  decimals,
-                  from: source,
-                  to: destination,
-                });
-
-                if (out.length >= max) break;
-              }
-
-              // Native SOL transfers
-              if (ix?.program === "system" && type === "transfer") {
-                const source = info.source || null;
-                const destination = info.destination || null;
-                const lamports = typeof info.lamports === "number" ? info.lamports : null;
-
-                const related = source === address || destination === address;
-                if (!related) continue;
-
-                const amountSol = lamports != null ? lamports / 1e9 : null;
-
-                out.push({
-                  signature,
-                  timestamp: blockTime,
-                  mint: null,
-                  symbol: "SOL",
-                  name: "Solana",
-                  amount: amountSol,
-                  decimals: 9,
-                  from: source,
-                  to: destination,
-                });
-
-                if (out.length >= max) break;
-              }
-            }
-          } catch {
-            // ignore
-          }
-        }
-
-        return out.slice(0, max);
+        const pubkey = new PublicKey(address);
+        const signatures = await connection.getSignaturesForAddress(pubkey, { limit: max });
+        return signatures.map((s) => ({
+          signature: s.signature,
+          timestamp: s.blockTime ?? null,
+        }));
       }
 
-      function shortAddress(addr, n = 4) {
-        return addr.length > 10 ? `${addr.slice(0, 4)}...${addr.slice(-4)}` : addr;
-      }
       function shortSignature(sig, n = 6) {
         return sig.length > 16 ? `${sig.slice(0, n)}...${sig.slice(-n)}` : sig;
       }
@@ -231,11 +93,11 @@
           setError(null);
           setRows([]);
           try {
-            const data = await getTransfersForAddress(rpcUrl.trim(), address.trim(), 10);
+            const data = await getLastTransactions(rpcUrl.trim(), address.trim(), 10);
             setRows(data);
             setStatus("success");
           } catch (e) {
-            setError(e?.message || "Failed to fetch transfers");
+            setError(e?.message || "Failed to fetch transactions");
             setStatus("error");
           }
         }, [rpcUrl, address]);
@@ -254,12 +116,12 @@
               React.createElement(
                 "h1",
                 { className: "text-3xl md:text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-solanaPurple to-solanaBlue" },
-                "Solana Token Transfers Viewer"
+                "Last 10 Transactions"
               ),
               React.createElement(
                 "p",
                 { className: "mt-2 text-sm text-gray-300" },
-                "Enter an RPC URL and a wallet address to view the last 10 transfers (SOL and SPL tokens)."
+                "Enter an RPC URL and a wallet address to view the last 10 transactions."
               )
             ),
             React.createElement(
@@ -331,14 +193,14 @@
                         ? "bg-gray-600 cursor-not-allowed"
                         : "bg-gradient-to-r from-solanaPurple to-solanaBlue hover:opacity-90"),
                   },
-                  status === "loading" ? "Fetching..." : "Fetch Transfers"
+                  status === "loading" ? "Fetching..." : "Fetch Transactions"
                 ),
                 status === "error" &&
                   error &&
                   React.createElement("span", { className: "text-red-300 text-sm" }, error),
                 status === "success" &&
                   rows.length === 0 &&
-                  React.createElement("span", { className: "text-gray-300 text-sm" }, "No transfers found.")
+                  React.createElement("span", { className: "text-gray-300 text-sm" }, "No transactions found.")
               )
             ),
             React.createElement(
@@ -353,11 +215,6 @@
                   React.createElement(
                     "tr",
                     { className: "text-left text-gray-300" },
-                    React.createElement("th", { className: "py-2 pr-4" }, "Token"),
-                    React.createElement("th", { className: "py-2 pr-4" }, "Symbol"),
-                    React.createElement("th", { className: "py-2 pr-4" }, "Amount"),
-                    React.createElement("th", { className: "py-2 pr-4" }, "From"),
-                    React.createElement("th", { className: "py-2 pr-4" }, "To"),
                     React.createElement("th", { className: "py-2 pr-4" }, "Signature"),
                     React.createElement("th", { className: "py-2 pr-4" }, "Timestamp")
                   )
@@ -374,27 +231,6 @@
                     return React.createElement(
                       "tr",
                       { key: r.signature + idx, className: "border-t border-white/10" },
-                      React.createElement("td", { className: "py-2 pr-4" }, r.name ?? r.mint ?? "-"),
-                      React.createElement("td", { className: "py-2 pr-4" }, r.symbol ?? "-"),
-                      React.createElement(
-                        "td",
-                        { className: "py-2 pr-4" },
-                        r.amount != null
-                          ? r.amount.toLocaleString(undefined, {
-                              maximumFractionDigits: r.decimals != null ? Math.min(r.decimals, 9) : 9,
-                            })
-                          : "-"
-                      ),
-                      React.createElement(
-                        "td",
-                        { className: "py-2 pr-4" },
-                        r.from ? React.createElement("span", { title: r.from }, shortAddress(r.from)) : "-"
-                      ),
-                      React.createElement(
-                        "td",
-                        { className: "py-2 pr-4" },
-                        r.to ? React.createElement("span", { title: r.to }, shortAddress(r.to)) : "-"
-                      ),
                       React.createElement(
                         "td",
                         { className: "py-2 pr-4" },
@@ -417,7 +253,7 @@
             React.createElement(
               "footer",
               { className: "text-center text-xs text-white/70" },
-              "Powered by Solana RPC. Includes SOL and SPL token transfers, matched to your wallet."
+              "Powered by Solana RPC."
             )
           )
         );

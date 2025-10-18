@@ -2,22 +2,14 @@ import React, { useCallback, useMemo, useState } from "react";
 import Head from "next/head";
 import { Connection, PublicKey } from "@solana/web3.js";
 
-type TransferRow = {
+type TxRow = {
   signature: string;
   timestamp: number | null;
-  mint: string | null;
-  symbol: string | null;
-  name: string | null;
-  amount: number | null;
-  decimals: number | null;
-  from: string | null;
-  to: string | null;
 };
 
 type RpcStatus = "idle" | "loading" | "error" | "success";
 
 const SOLSCAN_BASE = "https://solscan.io/tx/";
-const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 
 function clusterFromRpcUrl(url: string): "mainnet" | "devnet" | "testnet" | undefined {
   const u = url.toLowerCase();
@@ -27,153 +19,14 @@ function clusterFromRpcUrl(url: string): "mainnet" | "devnet" | "testnet" | unde
   return undefined;
 }
 
-async function fetchTokenList(): Promise<Record<string, { symbol: string; name: string }>> {
-  try {
-    const res = await fetch(
-      "https://raw.githubusercontent.com/solana-labs/token-list/main/src/tokens/solana.tokenlist.json"
-    );
-    const data = await res.json();
-    const map: Record<string, { symbol: string; name: string }> = {};
-    for (const t of data.tokens || []) {
-      map[t.address] = { symbol: t.symbol, name: t.name };
-    }
-    return map;
-  } catch {
-    return {};
-  }
-}
-
-async function getOwnedTokenAccounts(connection: Connection, owner: PublicKey) {
-  try {
-    const resp = await connection.getTokenAccountsByOwner(owner, { programId: TOKEN_PROGRAM_ID });
-    const set = new Set<string>();
-    for (const acc of resp.value) {
-      set.add(acc.pubkey.toBase58());
-    }
-    return set;
-  } catch {
-    return new Set<string>();
-  }
-}
-
-function collectParsedInstructions(tx: any): any[] {
-  const out: any[] = [];
-  const top = (tx.transaction?.message?.instructions ?? []) as any[];
-  for (const ix of top) out.push(ix);
-  const inner = tx.meta?.innerInstructions ?? [];
-  for (const group of inner) {
-    for (const ix of group.instructions ?? []) {
-      out.push(ix);
-    }
-  }
-  return out;
-}
-
-async function getTransfersForAddress(rpcUrl: string, address: string, max: number): Promise<TransferRow[]> {
+async function getLastTransactions(rpcUrl: string, address: string, max: number): Promise<TxRow[]> {
   const connection = new Connection(rpcUrl, "confirmed");
-  const wallet = new PublicKey(address);
-
-  // Resolve token accounts owned by the wallet to filter token transfers
-  const ownedTokenAccounts = await getOwnedTokenAccounts(connection, wallet);
-
-  const signatures = await connection.getSignaturesForAddress(wallet, { limit: 100 });
-  const out: TransferRow[] = [];
-  const tokenList = await fetchTokenList();
-
-  for (const sigInfo of signatures) {
-    if (out.length >= max) break;
-    try {
-      const tx = await connection.getParsedTransaction(sigInfo.signature, {
-        maxSupportedTransactionVersion: 0,
-      });
-      if (!tx) continue;
-
-      const blockTime = tx.blockTime ?? null;
-      const signature = sigInfo.signature;
-
-      const instructions = collectParsedInstructions(tx);
-
-      for (const ix of instructions) {
-        const parsed = ix?.parsed;
-        const type = parsed?.type;
-        const program = ix?.program; // 'spl-token' or 'system'
-        const info = parsed?.info || {};
-
-        // SPL token transfers: track transfers where source or destination is one of wallet-owned token accounts
-        if ((program === "spl-token" || info.mint) && (type === "transferChecked" || type === "transfer")) {
-          const source: string | null = info.source || null;
-          const destination: string | null = info.destination || null;
-          const mint: string | null = info.mint || null;
-          const decimals: number | null = typeof info.decimals === "number" ? info.decimals : null;
-          const rawAmountStr: string | null = info.tokenAmount?.amount ?? info.amount ?? null;
-
-          // Only include if related to this wallet (through token accounts)
-          const related =
-            (source && ownedTokenAccounts.has(source)) ||
-            (destination && ownedTokenAccounts.has(destination));
-          if (!related) {
-            continue;
-          }
-
-          let amount: number | null = null;
-          if (rawAmountStr !== null) {
-            const n = Number(rawAmountStr);
-            if (Number.isFinite(n)) {
-              amount = decimals != null ? n / 10 ** decimals : n;
-            }
-          }
-
-          const meta = mint ? tokenList[mint] : undefined;
-
-          out.push({
-            signature,
-            timestamp: blockTime,
-            mint,
-            symbol: meta?.symbol ?? null,
-            name: meta?.name ?? null,
-            amount,
-            decimals,
-            from: source,
-            to: destination,
-          });
-
-          if (out.length >= max) break;
-        }
-
-        // Native SOL transfers via system program
-        if (ix?.program === "system" && type === "transfer") {
-          const source: string | null = info.source || null;
-          const destination: string | null = info.destination || null;
-          const lamports: number | null = typeof info.lamports === "number" ? info.lamports : null;
-
-          // Only include if from/to is the wallet public key
-          const related = source === address || destination === address;
-          if (!related) continue;
-
-          const amountSol = lamports != null ? lamports / 1e9 : null;
-
-          out.push({
-            signature,
-            timestamp: blockTime,
-            mint: null,
-            symbol: "SOL",
-            name: "Solana",
-            amount: amountSol,
-            decimals: 9,
-            from: source,
-            to: destination,
-          });
-
-          if (out.length >= max) break;
-        }
-      }
-    } catch {
-      // ignore transaction-level errors
-    }
-  }
-
-  // Return the newest up to max
-  return out.slice(0, max);
+  const pubkey = new PublicKey(address);
+  const signatures = await connection.getSignaturesForAddress(pubkey, { limit: max });
+  return signatures.map((s) => ({
+    signature: s.signature,
+    timestamp: s.blockTime ?? null,
+  }));
 }
 
 export default function HomePage() {
@@ -181,7 +34,7 @@ export default function HomePage() {
   const [address, setAddress] = useState("");
   const [status, setStatus] = useState<RpcStatus>("idle");
   const [error, setError] = useState<string | null>(null);
-  const [rows, setRows] = useState<TransferRow[]>([]);
+  const [rows, setRows] = useState<TxRow[]>([]);
 
   const isValidUrl = useMemo(() => {
     try {
@@ -208,11 +61,11 @@ export default function HomePage() {
     setError(null);
     setRows([]);
     try {
-      const data = await getTransfersForAddress(rpcUrl.trim(), address.trim(), 10);
+      const data = await getLastTransactions(rpcUrl.trim(), address.trim(), 10);
       setRows(data);
       setStatus("success");
     } catch (e: any) {
-      setError(e?.message || "Failed to fetch transfers");
+      setError(e?.message || "Failed to fetch transactions");
       setStatus("error");
     }
   }, [rpcUrl, address]);
@@ -222,16 +75,16 @@ export default function HomePage() {
   return (
     <>
       <Head>
-        <title>Solana Token Transfers</title>
+        <title>Solana Transactions</title>
       </Head>
       <div className="min-h-screen px-4 py-8">
         <div className="max-w-5xl mx-auto space-y-6">
           <header className="text-center">
             <h1 className="text-3xl md:text-4xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-solanaPurple to-solanaBlue">
-              Solana Token Transfers Viewer
+              Last 10 Transactions
             </h1>
             <p className="mt-2 text-sm text-gray-300">
-              Enter an RPC URL and a wallet address to view the last 10 transfers (SOL and SPL tokens).
+              Enter an RPC URL and a wallet address to view the last 10 transactions.
             </p>
           </header>
 
@@ -276,13 +129,13 @@ export default function HomePage() {
                     : "bg-gradient-to-r from-solanaPurple to-solanaBlue hover:opacity-90"
                 }`}
               >
-                {status === "loading" ? "Fetching..." : "Fetch Transfers"}
+                {status === "loading" ? "Fetching..." : "Fetch Transactions"}
               </button>
               {status === "error" && error && (
                 <span className="text-red-300 text-sm">{error}</span>
               )}
               {status === "success" && rows.length === 0 && (
-                <span className="text-gray-300 text-sm">No transfers found.</span>
+                <span className="text-gray-300 text-sm">No transactions found.</span>
               )}
             </div>
           </section>
@@ -291,11 +144,6 @@ export default function HomePage() {
             <table className="min-w-full text-sm">
               <thead>
                 <tr className="text-left text-gray-300">
-                  <th className="py-2 pr-4">Token</th>
-                  <th className="py-2 pr-4">Symbol</th>
-                  <th className="py-2 pr-4">Amount</th>
-                  <th className="py-2 pr-4">From</th>
-                  <th className="py-2 pr-4">To</th>
                   <th className="py-2 pr-4">Signature</th>
                   <th className="py-2 pr-4">Timestamp</th>
                 </tr>
@@ -308,29 +156,6 @@ export default function HomePage() {
                     (cluster ? `?cluster=${cluster === "mainnet" ? "mainnet" : cluster}` : "");
                   return (
                     <tr key={r.signature + idx} className="border-t border-white/10">
-                      <td className="py-2 pr-4">{r.name ?? (r.mint ?? "SOL")}</td>
-                      <td className="py-2 pr-4">{r.symbol ?? (r.mint ? "-" : "SOL")}</td>
-                      <td className="py-2 pr-4">
-                        {r.amount != null
-                          ? r.amount.toLocaleString(undefined, {
-                              maximumFractionDigits: r.decimals != null ? Math.min(r.decimals, 9) : 9,
-                            })
-                          : "-"}
-                      </td>
-                      <td className="py-2 pr-4">
-                        {r.from ? (
-                          <span title={r.from}>{shortAddress(r.from)}</span>
-                        ) : (
-                          "-"
-                        )}
-                      </td>
-                      <td className="py-2 pr-4">
-                        {r.to ? (
-                          <span title={r.to}>{shortAddress(r.to)}</span>
-                        ) : (
-                          "-"
-                        )}
-                      </td>
                       <td className="py-2 pr-4">
                         <a
                           href={solscanUrl}
@@ -343,9 +168,7 @@ export default function HomePage() {
                         </a>
                       </td>
                       <td className="py-2 pr-4">
-                        {r.timestamp
-                          ? new Date(r.timestamp * 1000).toLocaleString()
-                          : "-"}
+                        {r.timestamp ? new Date(r.timestamp * 1000).toLocaleString() : "-"}
                       </td>
                     </tr>
                   );
@@ -355,7 +178,7 @@ export default function HomePage() {
           </section>
 
           <footer className="text-center text-xs text-white/70">
-            Powered by Solana RPC. Includes SOL and SPL token transfers, matched to your wallet.
+            Powered by Solana RPC.
           </footer>
         </div>
       </div>
@@ -363,9 +186,6 @@ export default function HomePage() {
   );
 }
 
-function shortAddress(addr: string, n = 4) {
-  return addr.length > 10 ? `${addr.slice(0, 4)}...${addr.slice(-4)}` : addr;
-}
 function shortSignature(sig: string, n = 6) {
   return sig.length > 16 ? `${sig.slice(0, n)}...${sig.slice(-n)}` : sig;
 }
