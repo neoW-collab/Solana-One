@@ -1,0 +1,21 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom styles */
+:root {
+  color-scheme: dark;
+}
+
+html, body, #__next {
+  height: 100%;
+}
+
+body {
+  color: #e5e7eb; /* text-gray-200 */
+  background: linear-gradient(135deg, #1f2670 0%, #5b2b86 50%, #1b3f7a 100%);
+}
+
+.card {
+  @apply bg-white/5 backdrop-blur rounded-xl border border-white/10 shadow-lg;
+}
