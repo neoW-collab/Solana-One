@@ -17,6 +17,7 @@ type TransferRow = {
 type RpcStatus = "idle" | "loading" | "error" | "success";
 
 const SOLSCAN_BASE = "https://solscan.io/tx/";
+const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 
 function clusterFromRpcUrl(url: string): "mainnet" | "devnet" | "testnet" | undefined {
   const u = url.toLowerCase();
@@ -42,14 +43,45 @@ async function fetchTokenList(): Promise<Record<string, { symbol: string; name: 
   }
 }
 
+async function getOwnedTokenAccounts(connection: Connection, owner: PublicKey) {
+  try {
+    const resp = await connection.getTokenAccountsByOwner(owner, { programId: TOKEN_PROGRAM_ID });
+    const set = new Set<string>();
+    for (const acc of resp.value) {
+      set.add(acc.pubkey.toBase58());
+    }
+    return set;
+  } catch {
+    return new Set<string>();
+  }
+}
+
+function collectParsedInstructions(tx: any): any[] {
+  const out: any[] = [];
+  const top = (tx.transaction?.message?.instructions ?? []) as any[];
+  for (const ix of top) out.push(ix);
+  const inner = tx.meta?.innerInstructions ?? [];
+  for (const group of inner) {
+    for (const ix of group.instructions ?? []) {
+      out.push(ix);
+    }
+  }
+  return out;
+}
+
 async function getTransfersForAddress(rpcUrl: string, address: string, max: number): Promise<TransferRow[]> {
   const connection = new Connection(rpcUrl, "confirmed");
-  const pubkey = new PublicKey(address);
-  const signatures = await connection.getSignaturesForAddress(pubkey, { limit: 50 });
+  const wallet = new PublicKey(address);
+
+  // Resolve token accounts owned by the wallet to filter token transfers
+  const ownedTokenAccounts = await getOwnedTokenAccounts(connection, wallet);
+
+  const signatures = await connection.getSignaturesForAddress(wallet, { limit: 100 });
   const out: TransferRow[] = [];
   const tokenList = await fetchTokenList();
 
   for (const sigInfo of signatures) {
+    if (out.length >= max) break;
     try {
       const tx = await connection.getParsedTransaction(sigInfo.signature, {
         maxSupportedTransactionVersion: 0,
@@ -58,18 +90,30 @@ async function getTransfersForAddress(rpcUrl: string, address: string, max: numb
 
       const blockTime = tx.blockTime ?? null;
       const signature = sigInfo.signature;
-      const instructions = tx.transaction.message.instructions as any[];
+
+      const instructions = collectParsedInstructions(tx);
 
       for (const ix of instructions) {
         const parsed = ix?.parsed;
         const type = parsed?.type;
-        if (type === "transferChecked" || type === "transfer") {
-          const info = parsed?.info || {};
-          const source = info.source || info.owner || null;
-          const destination = info.destination || null;
-          const mint = info.mint || null;
-          const decimals = typeof info.decimals === "number" ? info.decimals : null;
-          const rawAmountStr = info.tokenAmount?.amount ?? info.amount ?? null;
+        const program = ix?.program; // 'spl-token' or 'system'
+        const info = parsed?.info || {};
+
+        // SPL token transfers: track transfers where source or destination is one of wallet-owned token accounts
+        if ((program === "spl-token" || info.mint) && (type === "transferChecked" || type === "transfer")) {
+          const source: string | null = info.source || null;
+          const destination: string | null = info.destination || null;
+          const mint: string | null = info.mint || null;
+          const decimals: number | null = typeof info.decimals === "number" ? info.decimals : null;
+          const rawAmountStr: string | null = info.tokenAmount?.amount ?? info.amount ?? null;
+
+          // Only include if related to this wallet (through token accounts)
+          const related =
+            (source && ownedTokenAccounts.has(source)) ||
+            (destination && ownedTokenAccounts.has(destination));
+          if (!related) {
+            continue;
+          }
 
           let amount: number | null = null;
           if (rawAmountStr !== null) {
@@ -95,13 +139,40 @@ async function getTransfersForAddress(rpcUrl: string, address: string, max: numb
 
           if (out.length >= max) break;
         }
+
+        // Native SOL transfers via system program
+        if (ix?.program === "system" && type === "transfer") {
+          const source: string | null = info.source || null;
+          const destination: string | null = info.destination || null;
+          const lamports: number | null = typeof info.lamports === "number" ? info.lamports : null;
+
+          // Only include if from/to is the wallet public key
+          const related = source === address || destination === address;
+          if (!related) continue;
+
+          const amountSol = lamports != null ? lamports / 1e9 : null;
+
+          out.push({
+            signature,
+            timestamp: blockTime,
+            mint: null,
+            symbol: "SOL",
+            name: "Solana",
+            amount: amountSol,
+            decimals: 9,
+            from: source,
+            to: destination,
+          });
+
+          if (out.length >= max) break;
+        }
       }
-      if (out.length >= max) break;
     } catch {
-      // ignore individual transaction parse errors
+      // ignore transaction-level errors
     }
   }
 
+  // Return the newest up to max
   return out.slice(0, max);
 }
 
@@ -160,7 +231,7 @@ export default function HomePage() {
               Solana Token Transfers Viewer
             </h1>
             <p className="mt-2 text-sm text-gray-300">
-              Enter an RPC URL and a wallet address to view the last 10 SPL token transfers.
+              Enter an RPC URL and a wallet address to view the last 10 transfers (SOL and SPL tokens).
             </p>
           </header>
 
@@ -237,8 +308,8 @@ export default function HomePage() {
                     (cluster ? `?cluster=${cluster === "mainnet" ? "mainnet" : cluster}` : "");
                   return (
                     <tr key={r.signature + idx} className="border-t border-white/10">
-                      <td className="py-2 pr-4">{r.name ?? (r.mint ?? "-")}</td>
-                      <td className="py-2 pr-4">{r.symbol ?? "-"}</td>
+                      <td className="py-2 pr-4">{r.name ?? (r.mint ?? "SOL")}</td>
+                      <td className="py-2 pr-4">{r.symbol ?? (r.mint ? "-" : "SOL")}</td>
                       <td className="py-2 pr-4">
                         {r.amount != null
                           ? r.amount.toLocaleString(undefined, {
@@ -284,7 +355,7 @@ export default function HomePage() {
           </section>
 
           <footer className="text-center text-xs text-white/70">
-            Powered by Solana RPC. Parsed SPL token transfers only.
+            Powered by Solana RPC. Includes SOL and SPL token transfers, matched to your wallet.
           </footer>
         </div>
       </div>

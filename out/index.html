@@ -38,6 +38,7 @@
       import { Connection, PublicKey } from "https://esm.sh/@solana/web3.js@1.95.4";
 
       const SOLSCAN_BASE = "https://solscan.io/tx/";
+      const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 
       function clusterFromRpcUrl(url) {
         const u = url.toLowerCase();
@@ -63,14 +64,45 @@
         }
       }
 
+      async function getOwnedTokenAccounts(connection, owner) {
+        try {
+          const resp = await connection.getTokenAccountsByOwner(owner, { programId: TOKEN_PROGRAM_ID });
+          const set = new Set();
+          for (const acc of resp.value) {
+            set.add(acc.pubkey.toBase58());
+          }
+          return set;
+        } catch {
+          return new Set();
+        }
+      }
+
+      function collectParsedInstructions(tx) {
+        const out = [];
+        const top = (tx.transaction?.message?.instructions ?? []);
+        for (const ix of top) out.push(ix);
+        const inner = tx.meta?.innerInstructions ?? [];
+        for (const group of inner) {
+          for (const ix of (group.instructions ?? [])) {
+            out.push(ix);
+          }
+        }
+        return out;
+      }
+
       async function getTransfersForAddress(rpcUrl, address, max) {
         const connection = new Connection(rpcUrl, "confirmed");
-        const pubkey = new PublicKey(address);
-        const signatures = await connection.getSignaturesForAddress(pubkey, { limit: 50 });
+        const wallet = new PublicKey(address);
+
+        // Resolve token accounts owned by the wallet
+        const ownedTokenAccounts = await getOwnedTokenAccounts(connection, wallet);
+
+        const signatures = await connection.getSignaturesForAddress(wallet, { limit: 100 });
         const out = [];
         const tokenList = await fetchTokenList();
 
         for (const sigInfo of signatures) {
+          if (out.length >= max) break;
           try {
             const tx = await connection.getParsedTransaction(sigInfo.signature, {
               maxSupportedTransactionVersion: 0,
@@ -79,18 +111,27 @@
 
             const blockTime = tx.blockTime ?? null;
             const signature = sigInfo.signature;
-            const instructions = tx.transaction.message.instructions;
+
+            const instructions = collectParsedInstructions(tx);
 
             for (const ix of instructions) {
               const parsed = ix?.parsed;
               const type = parsed?.type;
-              if (type === "transferChecked" || type === "transfer") {
-                const info = parsed?.info || {};
-                const source = info.source || info.owner || null;
+              const program = ix?.program;
+              const info = parsed?.info || {};
+
+              // SPL token transfers
+              if ((program === "spl-token" || info.mint) && (type === "transferChecked" || type === "transfer")) {
+                const source = info.source || null;
                 const destination = info.destination || null;
                 const mint = info.mint || null;
                 const decimals = typeof info.decimals === "number" ? info.decimals : null;
                 const rawAmountStr = info.tokenAmount?.amount ?? info.amount ?? null;
+
+                const related =
+                  (source && ownedTokenAccounts.has(source)) ||
+                  (destination && ownedTokenAccounts.has(destination));
+                if (!related) continue;
 
                 let amount = null;
                 if (rawAmountStr !== null) {
@@ -116,8 +157,33 @@
 
                 if (out.length >= max) break;
               }
+
+              // Native SOL transfers
+              if (ix?.program === "system" && type === "transfer") {
+                const source = info.source || null;
+                const destination = info.destination || null;
+                const lamports = typeof info.lamports === "number" ? info.lamports : null;
+
+                const related = source === address || destination === address;
+                if (!related) continue;
+
+                const amountSol = lamports != null ? lamports / 1e9 : null;
+
+                out.push({
+                  signature,
+                  timestamp: blockTime,
+                  mint: null,
+                  symbol: "SOL",
+                  name: "Solana",
+                  amount: amountSol,
+                  decimals: 9,
+                  from: source,
+                  to: destination,
+                });
+
+                if (out.length >= max) break;
+              }
             }
-            if (out.length >= max) break;
           } catch {
             // ignore
           }
@@ -193,7 +259,7 @@
               React.createElement(
                 "p",
                 { className: "mt-2 text-sm text-gray-300" },
-                "Enter an RPC URL and a wallet address to view the last 10 SPL token transfers."
+                "Enter an RPC URL and a wallet address to view the last 10 transfers (SOL and SPL tokens)."
               )
             ),
             React.createElement(
@@ -351,7 +417,7 @@
             React.createElement(
               "footer",
               { className: "text-center text-xs text-white/70" },
-              "Powered by Solana RPC. Parsed SPL token transfers only."
+              "Powered by Solana RPC. Includes SOL and SPL token transfers, matched to your wallet."
             )
           )
         );
