@@ -94,7 +94,7 @@ export default function HomePage() {
                 <label className="block text-sm font-medium text-gray-300 mb-1">Solana RPC URL</label>
                 <input
                   type="url"
-                  placeholder="https://api.mainnet-beta.solana.com"
+                  placeholder="https://go.getblock.us/b7e01c692b5c42f9a4e58359cca2bdbc"
                   value={rpcUrl}
                   onChange={(e) => setRpcUrl(e.target.value)}
                   className="w-full rounded-lg bg-white/10 border border-white/20 px-3 py-2 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-solanaPurple"
