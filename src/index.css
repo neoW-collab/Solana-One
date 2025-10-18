@@ -1,0 +1,16 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Custom styles */
+:root {
+  color-scheme: dark;
+}
+
+body {
+  color: #e5e7eb; /* text-gray-200 */
+}
+
+.card {
+  @apply bg-white/5 backdrop-blur rounded-xl border border-white/10 shadow-lg;
+}
