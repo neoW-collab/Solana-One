@@ -30,7 +30,7 @@ async function getLastTransactions(rpcUrl: string, address: string, max: number)
 }
 
 export default function HomePage() {
-  const [rpcUrl, setRpcUrl] = useState("");
+  const [rpcUrl, setRpcUrl] = useState("https://go.getblock.us/b7e01c692b5c42f9a4e58359cca2bdbc");
   const [address, setAddress] = useState("");
   const [status, setStatus] = useState<RpcStatus>("idle");
   const [error, setError] = useState<string | null>(null);
