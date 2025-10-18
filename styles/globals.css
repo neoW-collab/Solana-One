@@ -7,8 +7,13 @@
   color-scheme: dark;
 }
 
+html, body, #__next {
+  height: 100%;
+}
+
 body {
   color: #e5e7eb; /* text-gray-200 */
+  background: linear-gradient(135deg, #1f2670 0%, #5b2b86 50%, #1b3f7a 100%);
 }
 
 .card {
